@@ -1,0 +1,17 @@
+{
+  "name": "antigravity-pro-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev": "npm run dev --workspaces --if-present",
+    "start": "npm run start --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
