@@ -1,10 +1,10 @@
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { 
-  defineAgent, 
-  JobContext, 
-  voice, 
+import {
+  defineAgent,
+  JobContext,
+  voice,
   llm,
   cli,
   WorkerOptions
@@ -13,6 +13,7 @@ import * as openai from '@livekit/agents-plugin-openai';
 import * as cartesia from '@livekit/agents-plugin-cartesia';
 import { z } from 'zod';
 import dotenv from 'dotenv';
+import { GoogleAuth } from 'google-auth-library';
 
 dotenv.config();
 
@@ -116,11 +117,36 @@ const agentDefinition = defineAgent({
     console.log(`Agent starting job: ${ctx.job.id} for room: ${ctx.room.name}`);
     await ctx.connect();
 
-    // Configure Gemini 2.5 Flash LLM via Google's OpenAI-compatible API
+    // Authenticate with Google Vertex AI using Service Account
+    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'google-credentials.json';
+    const absoluteCredsPath = path.isAbsolute(credentialsPath)
+      ? credentialsPath
+      : path.resolve(__dirname, '..', credentialsPath);
+
+    console.log(`Authenticating using Google Service Account credentials at: ${absoluteCredsPath}`);
+    const auth = new GoogleAuth({
+      keyFile: absoluteCredsPath,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform']
+    });
+    const client = await auth.getClient();
+    const tokenResponse = await client.getAccessToken();
+    if (!tokenResponse.token) {
+      throw new Error('Failed to generate Google Cloud OAuth token from service account credentials.');
+    }
+
+    const apiKey = tokenResponse.token;
+    const credentialsJson = JSON.parse(readFileSync(absoluteCredsPath, 'utf8'));
+    const projectId = credentialsJson.project_id || 'speed-star-beta';
+    const region = process.env.GOOGLE_CLOUD_REGION || 'global';
+    const host = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
+    const baseURL = `https://${host}/v1/projects/${projectId}/locations/${region}/endpoints/openapi`;
+    const model = 'google/gemini-3.5-flash';
+    console.log(`Authenticated with Service Account. Using Vertex AI Endpoint: ${baseURL} and model: ${model}`);
+
     const geminiLLM = new openai.LLM({
-      apiKey: process.env.GOOGLE_AI_API_KEY || '',
-      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-      model: 'gemini-2.5-flash'
+      apiKey,
+      baseURL,
+      model
     });
 
     const agent = new voice.Agent({
@@ -133,9 +159,9 @@ const agentDefinition = defineAgent({
     const session = new voice.AgentSession({
       stt: new cartesia.STT({ model: 'ink-2', language: 'bn' }),
       llm: geminiLLM,
-      tts: new cartesia.TTS({ 
-        model: 'sonic-3.5', 
-        language: 'bn', 
+      tts: new cartesia.TTS({
+        model: 'sonic-3.5',
+        language: 'bn',
         voice: process.env.CARTESIA_VOICE_ID || 'd16e0c03-51cf-4d7a-b286-53c82d335607'
       }),
       tools: toolsList
@@ -151,7 +177,7 @@ export default agentDefinition;
 
 // Guard to ensure it runs only when the file is executed directly
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  cli.runApp(new WorkerOptions({ 
-    agent: fileURLToPath(import.meta.url) 
+  cli.runApp(new WorkerOptions({
+    agent: fileURLToPath(import.meta.url)
   }));
 }
