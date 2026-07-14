@@ -11,6 +11,7 @@ import {
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import * as cartesia from '@livekit/agents-plugin-cartesia';
+import * as deepgram from '@livekit/agents-plugin-deepgram';
 import { z } from 'zod';
 import dotenv from 'dotenv';
 import { GoogleAuth } from 'google-auth-library';
@@ -33,7 +34,49 @@ try {
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
 
-// Tool Definition: check_availability
+// ============================================================
+// Google OAuth2 Token Manager — auto-refreshes before expiry
+// ============================================================
+class TokenManager {
+  private auth: GoogleAuth;
+  private cachedToken: string | null = null;
+  private tokenExpiresAt: number = 0;
+  // Refresh 5 minutes before actual expiry to avoid mid-request failures
+  private readonly REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+  constructor(keyFile: string) {
+    this.auth = new GoogleAuth({
+      keyFile,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform']
+    });
+  }
+
+  async getToken(): Promise<string> {
+    const now = Date.now();
+    if (this.cachedToken && now < this.tokenExpiresAt - this.REFRESH_BUFFER_MS) {
+      return this.cachedToken;
+    }
+
+    console.log('Refreshing Google Cloud OAuth2 token...');
+    const client = await this.auth.getClient();
+    const tokenResponse = await client.getAccessToken();
+    if (!tokenResponse.token) {
+      throw new Error('Failed to generate Google Cloud OAuth token from service account credentials.');
+    }
+
+    this.cachedToken = tokenResponse.token;
+    // Google OAuth2 tokens typically expire in 1 hour (3600s)
+    this.tokenExpiresAt = now + 3600 * 1000;
+    console.log('Google Cloud OAuth2 token refreshed successfully.');
+    return this.cachedToken;
+  }
+}
+
+// ============================================================
+// Tool Definitions
+// ============================================================
+
+// Tool: check_availability
 const check_availability = llm.tool({
   name: 'check_availability',
   description: 'Check availability slots for a given specialty (e.g., Chiropractor, Physiotherapist, Massage Therapist, Sports Rehabilitation Coach, General Consultant).',
@@ -62,7 +105,7 @@ const check_availability = llm.tool({
   }
 });
 
-// Tool Definition: book_appointment
+// Tool: book_appointment
 const book_appointment = llm.tool({
   name: 'book_appointment',
   description: 'Book an appointment for a confirmed availability slot with the patient details.',
@@ -89,58 +132,55 @@ const book_appointment = llm.tool({
   }
 });
 
-// Tool Definition: end_call
+// Tool: end_call — graceful disconnect instead of process.exit
 const end_call = llm.tool({
   name: 'end_call',
   description: 'Politely close/terminate the call with the caller when the conversation is finished or if the caller hangs up.',
   parameters: z.object({}),
   execute: async (_, opts) => {
-    console.log('LLM requested to end call. Shutting down context...');
+    console.log('LLM requested to end call. Initiating graceful disconnect...');
+    const runCtx = opts.ctx;
+    // Give the agent 2 seconds to speak its final closing sentence before disconnecting
     setTimeout(async () => {
       try {
-        const runCtx = opts.ctx;
-        // Accessing job context or room to disconnect
-        console.log('Initiating job shutdown...');
-        process.exit(0);
+        console.log('Disconnecting from LiveKit room gracefully...');
+        if (runCtx.session) {
+          await runCtx.session.close();
+        }
       } catch (err) {
-        console.error('Failed to end call process:', err);
+        console.error('Failed to close session gracefully:', err);
       }
-    }, 1500); // Small buffer to let the agent speak its final close sentence.
+    }, 2000);
     return JSON.stringify({ status: 'Call ending initiated.' });
   }
 });
 
 const toolsList = [check_availability, book_appointment, end_call];
 
+// ============================================================
+// Agent Definition
+// ============================================================
 const agentDefinition = defineAgent({
   entry: async (ctx: JobContext) => {
     console.log(`Agent starting job: ${ctx.job.id} for room: ${ctx.room.name}`);
     await ctx.connect();
 
-    // Authenticate with Google Vertex AI using Service Account
+    // ── Authenticate with Google Vertex AI ──
     const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'google-credentials.json';
     const absoluteCredsPath = path.isAbsolute(credentialsPath)
       ? credentialsPath
       : path.resolve(__dirname, '..', credentialsPath);
 
     console.log(`Authenticating using Google Service Account credentials at: ${absoluteCredsPath}`);
-    const auth = new GoogleAuth({
-      keyFile: absoluteCredsPath,
-      scopes: ['https://www.googleapis.com/auth/cloud-platform']
-    });
-    const client = await auth.getClient();
-    const tokenResponse = await client.getAccessToken();
-    if (!tokenResponse.token) {
-      throw new Error('Failed to generate Google Cloud OAuth token from service account credentials.');
-    }
+    const tokenManager = new TokenManager(absoluteCredsPath);
+    const apiKey = await tokenManager.getToken();
 
-    const apiKey = tokenResponse.token;
     const credentialsJson = JSON.parse(readFileSync(absoluteCredsPath, 'utf8'));
     const projectId = credentialsJson.project_id || 'speed-star-beta';
     const region = process.env.GOOGLE_CLOUD_REGION || 'global';
     const host = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
     const baseURL = `https://${host}/v1/projects/${projectId}/locations/${region}/endpoints/openapi`;
-    const model = 'google/gemini-3.5-flash';
+    const model = 'google/gemini-2.5-flash-lite';
     console.log(`Authenticated with Service Account. Using Vertex AI Endpoint: ${baseURL} and model: ${model}`);
 
     const geminiLLM = new openai.LLM({
@@ -149,25 +189,90 @@ const agentDefinition = defineAgent({
       model
     });
 
+    // Periodically refresh the OAuth2 token so the LLM connection survives past 1 hour
+    const tokenRefreshInterval = setInterval(async () => {
+      try {
+        const freshToken = await tokenManager.getToken();
+        // Update the LLM's API key with the fresh token
+        (geminiLLM as any).apiKey = freshToken;
+        console.log('LLM API key refreshed with new OAuth2 token.');
+      } catch (err) {
+        console.error('Failed to refresh OAuth2 token:', err);
+      }
+    }, 45 * 60 * 1000); // Refresh every 45 minutes
+
     const agent = new voice.Agent({
       instructions: systemPrompt,
-      llm: geminiLLM,
+      llm: geminiLLM as any,
       tools: toolsList
     });
 
-    // Configure STT and TTS using Cartesia
+    // ── Configure STT (Deepgram Nova-3) and TTS (Cartesia Sonic-3.5) ──
     const session = new voice.AgentSession({
-      stt: new cartesia.STT({ model: 'ink-2', language: 'bn' }),
-      llm: geminiLLM,
+      // Deepgram Nova-3: native Bengali support with high accuracy for Bangladeshi dialect
+      stt: new deepgram.STT({
+        model: 'nova-3',
+        language: 'bn',
+      }),
+      llm: geminiLLM as any,
+      // Cartesia Sonic-3.5: strong Bengali TTS with sub-90ms latency
       tts: new cartesia.TTS({
         model: 'sonic-3.5',
         language: 'bn',
         voice: process.env.CARTESIA_VOICE_ID || 'd16e0c03-51cf-4d7a-b286-53c82d335607'
-      }),
-      tools: toolsList
+      }) as any,
+      tools: toolsList,
+
+      // ── Turn Handling Configuration ──
+      turnHandling: {
+        // Dynamic endpointing: waits for the user to truly finish speaking
+        endpointing: {
+          mode: 'dynamic',
+          minDelay: 500,   // Min silence before agent responds (ms)
+          maxDelay: 3000,  // Max wait before forcing a turn (ms)
+        },
+        // Adaptive interruption: distinguishes real interruptions from filler words/backchannels
+        interruption: {
+          enabled: true,
+          mode: 'adaptive',
+          minDuration: 600,   // Minimum speech to count as interruption (ms)
+          minWords: 2,        // At least 2 words before interrupting agent
+          resumeFalseInterruption: true,  // Resume agent speech if it was a false alarm
+          falseInterruptionTimeout: 2500, // Wait 2.5s before deciding it was false
+        },
+      },
+
+      // Increase user-away timeout: don't mark user as "away" for 2 minutes of silence
+      userAwayTimeout: 120,
+
+      // Allow up to 5 sequential tool calls per turn (e.g. check availability then book)
+      maxToolSteps: 5,
     });
 
-    console.log('Starting Agent Session...');
+    // ── Session Event Logging for Observability ──
+    const sessionEmitter = session as any;
+    sessionEmitter.on('user_input_transcribed', (ev: any) => {
+      console.log(`[STT] User said: "${ev.transcript}" (final: ${ev.isFinal})`);
+    });
+
+    sessionEmitter.on('conversation_item_added', (ev: any) => {
+      console.log(`[Chat] New conversation item added. Role: ${ev.item?.role ?? 'unknown'}`);
+    });
+
+    sessionEmitter.on('agent_state_changed', (ev: any) => {
+      console.log(`[Agent] State changed: ${ev.oldState} → ${ev.state}`);
+    });
+
+    sessionEmitter.on('error', (ev: any) => {
+      console.error(`[Session Error]`, ev);
+    });
+
+    sessionEmitter.on('close', (ev: any) => {
+      console.log(`[Session] Closed. Reason: ${ev.reason}`);
+      clearInterval(tokenRefreshInterval);
+    });
+
+    console.log('Starting Agent Session with Deepgram STT (Nova-3) + Cartesia TTS (Sonic-3.5)...');
     await session.start({ agent, room: ctx.room });
     console.log('Agent Session started successfully.');
   }
