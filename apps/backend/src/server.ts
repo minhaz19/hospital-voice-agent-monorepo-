@@ -360,7 +360,7 @@ app.post('/api/token', async (req: Request, res: Response) => {
     const roomName = `sristi-call-${Date.now()}`;
     const at = new AccessToken(apiKey, apiSecret, {
       identity: participantName,
-      ttl: '10m', // 10 minutes duration
+      ttl: '1h', // 1 hour duration — long enough for extended booking calls
     });
 
     at.addGrant({

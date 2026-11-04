@@ -36,3 +36,7 @@ yarn-error.log*
 
 # Lock files (optional - remove this line if you want to track lock files)
 # package-lock.json
+
+# Credentials and secrets
+google-credentials.json
+*.json.secret

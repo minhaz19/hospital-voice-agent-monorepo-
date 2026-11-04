@@ -12,6 +12,7 @@
     "start": "npm run start --workspaces --if-present"
   },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "zod": "^3.25.76"
   }
 }

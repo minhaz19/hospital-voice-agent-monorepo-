@@ -1,31 +1,45 @@
 import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { 
-  StyleSheet, 
-  Text, 
-  View, 
-  ScrollView, 
-  TouchableOpacity, 
-  TextInput, 
-  ActivityIndicator, 
+import {
+  StyleSheet,
+  Text,
+  View,
+  ScrollView,
+  TouchableOpacity,
+  TextInput,
+  ActivityIndicator,
   Alert,
   SafeAreaView,
   Animated,
-  Modal
+  Modal,
+  Platform,
+  NativeModules
 } from 'react-native';
-import { 
-  Specialty, 
-  Specialist, 
-  AvailabilitySlot, 
+import {
+  Specialty,
+  Specialist,
+  AvailabilitySlot,
   Booking,
-  CheckAvailabilityResponse, 
-  BookAppointmentResponse 
+  CheckAvailabilityResponse,
+  BookAppointmentResponse
 } from '@antigravity-pro/types';
 import { Room, RoomEvent, ConnectionState } from 'livekit-client';
 import { AudioSession, registerGlobals, AndroidAudioTypePresets } from '@livekit/react-native';
 
-// Connect to backend server running locally
-const BACKEND_URL = 'http://localhost:3001';
+// Dynamically determine the backend URL based on the Metro packager host address.
+// This supports physical devices over Wi-Fi (LAN IP), USB debugging (localhost + adb reverse), and emulators.
+const getBackendUrl = () => {
+  const scriptURL = NativeModules.SourceCode?.scriptURL;
+  if (scriptURL) {
+    const address = scriptURL.split('://')[1].split('/')[0];
+    const host = address.split(':')[0];
+    return `http://${host}:3001`;
+  }
+  return 'http://localhost:3001';
+};
+
+const BACKEND_URL = getBackendUrl();
+console.log('Using backend URL:', BACKEND_URL);
 
 // Initialize LiveKit globals
 let isLiveKitAvailable = false;
@@ -205,7 +219,7 @@ export default function App() {
     let t1: any, t2: any, t3: any, t4: any;
     if (callState === 'connected' && !liveKitRoom) {
       setCaption("Sristi: Assalamu Alaikum! Welcome to Voice Agents Beta. I am Sristi, your AI assistant. How can I help you book your appointment today?");
-      
+
       t1 = setTimeout(() => {
         setCaption("Patient: Hi, I'd like to book an appointment with Dr. Tariqul Islam for neck pain.");
       }, 6000);
@@ -216,7 +230,7 @@ export default function App() {
 
       t3 = setTimeout(() => {
         setCaption("Sristi: Awesome. I have booked your slot for July 13th at 10:00 AM. A confirmation text was sent to your phone! Anything else I can help with?");
-        
+
         // Add a mock booking to the UI immediately
         const mockNewB: Booking = {
           id: `sim-${Date.now()}`,
@@ -277,7 +291,7 @@ export default function App() {
 
       try {
         await AudioSession.configureAudio({
-          android: { 
+          android: {
             preferredOutputList: ['speaker'],
             audioTypeOptions: AndroidAudioTypePresets.communication
           },
@@ -291,6 +305,14 @@ export default function App() {
       const room = new Room({
         adaptiveStream: true,
         dynacast: true,
+        // Enable automatic reconnection on transient network drops
+        reconnectPolicy: {
+          maxRetries: 5,
+          nextRetryDelayInMs: (context: { retryCount: number }) => {
+            // Exponential backoff: 300ms, 600ms, 1200ms, 2400ms, 4800ms
+            return Math.min(300 * Math.pow(2, context.retryCount), 5000);
+          },
+        },
       });
 
       setLiveKitRoom(room);
@@ -299,8 +321,13 @@ export default function App() {
         console.log('LiveKit connection state:', state);
         if (state === ConnectionState.Connected) {
           setCallState('connected');
-        } else if (state === ConnectionState.Connecting || state === ConnectionState.Reconnecting) {
+          setCaption('');
+        } else if (state === ConnectionState.Connecting) {
           setCallState('connecting');
+        } else if (state === ConnectionState.Reconnecting) {
+          // Show reconnecting state instead of ending the call
+          setCallState('connecting');
+          setCaption('Reconnecting...');
         } else if (state === ConnectionState.Disconnected) {
           setCallState('ended');
           setTimeout(() => {
@@ -355,7 +382,7 @@ export default function App() {
     try {
       const nextSpeaker = !isSpeakerOn;
       await AudioSession.configureAudio({
-        android: { 
+        android: {
           preferredOutputList: [nextSpeaker ? 'speaker' : 'earpiece'],
           audioTypeOptions: AndroidAudioTypePresets.communication
         },
@@ -445,7 +472,7 @@ export default function App() {
               Skip the forms! Talk directly with Sristy, our clinic AI receptionist, to look up specialists and schedule your appointment.
             </Text>
           </View>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.voiceCallButton}
             onPress={startCall}
             activeOpacity={0.85}
@@ -569,7 +596,7 @@ export default function App() {
               style={styles.input}
             />
 
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.bookButton}
               disabled={bookingLoading}
               onPress={handleBook}
@@ -599,7 +626,7 @@ export default function App() {
                   <View style={styles.bookingItemHeader}>
                     <Text style={styles.bookingPatient}>{booking.patientName}</Text>
                     <Text style={[
-                      styles.bookingStatus, 
+                      styles.bookingStatus,
                       booking.status === 'confirmed' ? styles.statusConfirmed : styles.statusCancelled
                     ]}>
                       {booking.status.toUpperCase()}
@@ -628,7 +655,7 @@ export default function App() {
       >
         <SafeAreaView style={styles.callScreenContainer}>
           <StatusBar style="light" />
-          
+
           {/* Header */}
           <View style={styles.callHeader}>
             <Text style={styles.callClinicName}>Voice Agents Beta</Text>
@@ -639,30 +666,30 @@ export default function App() {
           <View style={styles.callVisualizerContainer}>
             {/* Pulsing visualizer circles */}
             {callState === 'connected' && (
-              <Animated.View 
+              <Animated.View
                 style={[
-                  styles.pulsingRing, 
+                  styles.pulsingRing,
                   { transform: [{ scale: pulseAnim }] }
-                ]} 
+                ]}
               />
             )}
-            
+
             <View style={styles.agentAvatarBig}>
               <Text style={styles.agentAvatarText}>S</Text>
             </View>
-            
+
             <Text style={styles.agentNameCall}>Sristy</Text>
             <Text style={[
               styles.callStatusText,
-              callState === 'connected' ? styles.callStatusConnected : 
-              callState === 'failed' ? styles.callStatusFailed : styles.callStatusConnecting
+              callState === 'connected' ? styles.callStatusConnected :
+                callState === 'failed' ? styles.callStatusFailed : styles.callStatusConnecting
             ]}>
               {callState === 'fetching' ? 'Requesting line...' :
-               callState === 'connecting' ? 'Connecting...' :
-               callState === 'ringing' ? 'Ringing Sristy...' :
-               callState === 'connected' ? 'Active Call' :
-               callState === 'ended' ? 'Call Ended' :
-               callState === 'failed' ? 'Connection Failed' : 'Idle'}
+                callState === 'connecting' ? 'Connecting...' :
+                  callState === 'ringing' ? 'Ringing Sristy...' :
+                    callState === 'connected' ? 'Active Call' :
+                      callState === 'ended' ? 'Call Ended' :
+                        callState === 'failed' ? 'Connection Failed' : 'Idle'}
             </Text>
 
             {/* Active timer */}
@@ -673,7 +700,7 @@ export default function App() {
 
           {/* Captions Display Box (Shows real-time voice call script fallback) */}
           <View style={styles.captionsContainer}>
-            <ScrollView 
+            <ScrollView
               contentContainerStyle={styles.captionsScroll}
               ref={(ref) => ref?.scrollToEnd({ animated: true })}
             >
@@ -689,12 +716,12 @@ export default function App() {
           {callState === 'connected' && (
             <View style={styles.waveformContainer}>
               {barHeights.map((anim, idx) => (
-                <Animated.View 
-                  key={idx} 
+                <Animated.View
+                  key={idx}
                   style={[
-                    styles.waveformBar, 
+                    styles.waveformBar,
                     { height: anim }
-                  ]} 
+                  ]}
                 />
               ))}
             </View>
@@ -703,7 +730,7 @@ export default function App() {
           {/* Call Controls */}
           <View style={styles.callControlsContainer}>
             {/* Mute Button */}
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.controlCircleBtn, isMuted && styles.controlBtnActive]}
               onPress={toggleMute}
             >
@@ -712,7 +739,7 @@ export default function App() {
             </TouchableOpacity>
 
             {/* End Call Button */}
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.hangupButton}
               onPress={endCall}
             >
@@ -721,7 +748,7 @@ export default function App() {
             </TouchableOpacity>
 
             {/* Speaker Button */}
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.controlCircleBtn, isSpeakerOn && styles.controlBtnActive]}
               onPress={toggleSpeaker}
             >
